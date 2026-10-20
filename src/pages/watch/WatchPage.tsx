@@ -100,9 +100,9 @@ import {
   selectSourceForServer,
   setPreferredServer,
   shouldAutoSkipSource,
-  sortServersByHealth,
   DubQualityProfile,
 } from "@/lib/watch/sourceIntelligence";
+import { collectOfficialServerNames, collectOfferedSourceUrls, mergeEpisodeServers } from "@/lib/watch/episodeServers";
 
 function toLocalFileUrl(filePath?: string): string {
   if (!filePath) return '';
@@ -1247,61 +1247,81 @@ export default function WatchPage() {
     toast.success(uiI18n.t('app.refreshing_sources_5d2c90da'));
   }, [decodedEpisodeId, queryClient]);
 
+  // The number the episode id carries itself (`<baseId>?ep=<n>`). It is the only
+  // number available before the listing resolves, or when the listing has no row
+  // for this id, and source resolution needs it to pick the right episode.
+  const idEpisodeNumber = useMemo(() => {
+    const parsed = Number(/[?&]ep=(\d+)/i.exec(String(decodedEpisodeId || ""))?.[1]);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }, [decodedEpisodeId]);
+
+  // Find current episode BEFORE the hooks that read its number: the source
+  // resolution below needs it, and the server list is built from what resolves.
+  const currentEpisodeIndex = useMemo(() => {
+    const list = isOfflineMode ? offlineManifest?.episodes : episodesData?.episodes;
+    if (!list || list.length === 0) return -1;
+
+    const exact = list.findIndex(
+      (ep: any) => (ep.episodeId || ep.id) === decodedEpisodeId
+    );
+    if (exact >= 0) return exact;
+
+    // A link minted from one episode tier goes unrecognised when the list is
+    // later rebuilt from another, which is what left the header reading
+    // "Episode ?" while the sidebar showed the episode just fine.
+    return idEpisodeNumber ? list.findIndex((ep: any) => Number(ep.number) === idEpisodeNumber) : -1;
+  }, [isOfflineMode, offlineManifest, episodesData, decodedEpisodeId, idEpisodeNumber]);
+
+  const currentEpisode = useMemo(() => {
+    const list = isOfflineMode ? offlineManifest?.episodes : episodesData?.episodes;
+    return list?.[currentEpisodeIndex];
+  }, [isOfflineMode, offlineManifest, episodesData, currentEpisodeIndex]);
+
+  // What the header, the player, and history call this episode. The listing wins
+  // when it has a row; otherwise the id's own number does, so the UI never has to
+  // render "?" for an episode the user is already watching.
+  const currentEpisodeNumber = Number(currentEpisode?.number) > 0
+    ? Number(currentEpisode?.number)
+    : (idEpisodeNumber ?? currentEpisode?.number);
+
+  // Keep combined source query stable so manual server selection doesn't trigger full refetch.
+  const combinedSourceServer = "hd-1";
+
+  const {
+    data: sourcesData,
+    isLoading: loadingSources,
+    isFetching: fetchingSources,
+    error: sourcesError,
+    refetch: refetchSources,
+  } = useCombinedSourcesWithRefetch(
+    decodedEpisodeId,
+    animeData?.info.name,
+    currentEpisodeNumber,
+    combinedSourceServer,
+    category,
+    user?.id,
+    (animeData as any)?.anilistID || animeData?.moreInfo.anilistId || null,
+    (animeData as any)?.malID || animeData?.moreInfo.malId || null
+  );
+
   const availableServers = useMemo(() => {
-    const rawServers = (category === "sub" ? serversData?.sub : serversData?.dub) || [];
-    const dedupedServers = rawServers.filter((server, index, array) => {
-      const normalized = String(server.serverName || "").trim().toLowerCase();
-      if (!normalized) return false;
-      return index === array.findIndex((candidate) => String(candidate.serverName || "").trim().toLowerCase() === normalized);
-    });
-
-    const sorted = sortServersByHealth(dedupedServers);
-
-    /**
-     * Server order is the extension's decision, not the app's.
-     *
-     * `providerPriority` is the rank the extension stamps on every source from
-     * its own provider registry (`providerPriorityOf` in
-     * `extension/toko/src/providers/registry.ts`); the host relays it untouched
-     * and `mapRawSourcesToStreamingData` carries it onto each server. Sorting on
-     * it here is not a second policy — the numbers are the extension's, this
-     * only re-applies them after the dedupe above loses the array order.
-     *
-     * This replaces a hardcoded "pin Nebula first" pass, which needed an app
-     * release to change the preferred provider and — because it ran *after* the
-     * saved-preference pin below — silently overrode whichever server the user
-     * had explicitly chosen.
-     *
-     * Stable within a rank, so a provider's own quality/seeder ordering
-     * survives, and unranked servers (the central-dispatch fallback, which
-     * knows nothing about extension providers) keep their relative order at the
-     * end.
-     */
-    const ranked = sorted
-      .map((server, idx) => ({ server, idx }))
-      .sort((a, b) => {
-        const pa = Number.isFinite(a.server?.providerPriority)
-          ? Number(a.server.providerPriority)
-          : Number.MAX_SAFE_INTEGER;
-        const pb = Number.isFinite(b.server?.providerPriority)
-          ? Number(b.server.providerPriority)
-          : Number.MAX_SAFE_INTEGER;
-        return pa === pb ? a.idx - b.idx : pa - pb;
-      })
-      .map(({ server }) => server);
+    const merged = mergeEpisodeServers(
+      category === "sub" ? serversData?.sub : serversData?.dub,
+      sourcesData?.providerServers,
+    );
 
     // An explicit user choice outranks the extension's default.
     const savedPref = getPreferredServer(animeId, category);
     if (savedPref) {
-      const prefIndex = ranked.findIndex((s) => s.serverName.toLowerCase() === savedPref.toLowerCase());
+      const prefIndex = merged.findIndex((s) => s.serverName.toLowerCase() === savedPref.toLowerCase());
       if (prefIndex > 0) {
-        const pinned = ranked[prefIndex];
-        return [pinned, ...ranked.slice(0, prefIndex), ...ranked.slice(prefIndex + 1)];
+        const pinned = merged[prefIndex];
+        return [pinned, ...merged.slice(0, prefIndex), ...merged.slice(prefIndex + 1)];
       }
     }
 
-    return ranked;
-  }, [category, serversData, animeId, dubProfile]);
+    return merged;
+  }, [category, serversData, sourcesData, animeId, dubProfile]);
 
   const availableServersRef = useRef(availableServers);
 
@@ -1485,30 +1505,6 @@ export default function WatchPage() {
     setPreferredSourceUrl(null);
   }, [decodedEpisodeId, category]);
 
-  // Find current episode BEFORE using it in hooks
-  const currentEpisodeIndex = useMemo(() => {
-    const list = isOfflineMode ? offlineManifest?.episodes : episodesData?.episodes;
-    if (!list || list.length === 0) return -1;
-
-    const exact = list.findIndex(
-      (ep: any) => (ep.episodeId || ep.id) === decodedEpisodeId
-    );
-    if (exact >= 0) return exact;
-
-    // The id carries its own episode number (`<baseId>?ep=<n>`), so fall back to
-    // that. Without it a link minted from one episode tier goes unrecognised when
-    // the list is later rebuilt from another — which is what left the header
-    // reading "Episode ?" while the sidebar showed the episode just fine.
-    const parsed = Number(/[?&]ep=(\d+)/i.exec(String(decodedEpisodeId || ""))?.[1]);
-    if (!Number.isFinite(parsed) || parsed <= 0) return -1;
-    return list.findIndex((ep: any) => Number(ep.number) === parsed);
-  }, [isOfflineMode, offlineManifest, episodesData, decodedEpisodeId]);
-
-  const currentEpisode = useMemo(() => {
-    const list = isOfflineMode ? offlineManifest?.episodes : episodesData?.episodes;
-    return list?.[currentEpisodeIndex];
-  }, [isOfflineMode, offlineManifest, episodesData, currentEpisodeIndex]);
-
   // An episode ani.zip dates in the future must never reach the player: with no
   // legitimate streams, resolution can fall back to an unrelated title's
   // sources (reported as another show playing instead of this episode).
@@ -1539,9 +1535,6 @@ export default function WatchPage() {
     const list = isOfflineMode ? offlineManifest?.episodes : episodesData?.episodes;
     return currentEpisodeIndex < (list?.length ?? 0) - 1 ? list?.[currentEpisodeIndex + 1] : null;
   }, [isOfflineMode, offlineManifest, episodesData, currentEpisodeIndex]);
-
-  // Keep combined source query stable so manual server selection doesn't trigger full refetch.
-  const combinedSourceServer = "hd-1";
 
   useEffect(() => {
     if (isOfflineMode || !nextEpisode?.episodeId || isEpisodeUnaired(nextEpisode as any)) return;
@@ -1609,23 +1602,6 @@ export default function WatchPage() {
   ]);
 
   const discordDetails = animeData?.info.name ?? null;
-
-  const {
-    data: sourcesData,
-    isLoading: loadingSources,
-    isFetching: fetchingSources,
-    error: sourcesError,
-    refetch: refetchSources,
-  } = useCombinedSourcesWithRefetch(
-    decodedEpisodeId,
-    animeData?.info.name,
-    currentEpisode?.number,
-    combinedSourceServer,
-    category,
-    user?.id,
-    (animeData as any)?.anilistID || animeData?.moreInfo.anilistId || null,
-    (animeData as any)?.malID || animeData?.moreInfo.malId || null
-  );
 
   const { data: fastStartData, isLoading: loadingFastStart } = useQuery({
     queryKey: ["fast-start-source", decodedEpisodeId, currentServer?.serverName, category],
@@ -2258,7 +2234,7 @@ export default function WatchPage() {
   }, [activePlaybackSource?.url, activePlaybackSource?.providerName, activePlaybackSource?.server, activePlaybackSource?.isEmbed, isOfflineMode, isMobileApp, activePlaybackHeaders?.Referer, activePlaybackHeaders?.["User-Agent"], category, currentServer?.serverName, animeId, decodedEpisodeId, user?.id]);
 
   const officialServerNameSet = useMemo(() => {
-    return new Set(availableServers.map((server) => String(server.serverName || "").trim().toLowerCase()).filter(Boolean));
+    return new Set(collectOfficialServerNames(availableServers));
   }, [availableServers]);
 
   const isOfficialSource = useCallback((source: any) => {
@@ -2340,6 +2316,30 @@ export default function WatchPage() {
     [],
   );
 
+  /**
+   * The exact stream each provider button in the "Servidor" row plays, so the
+   * language section can skip it instead of showing two buttons for one source.
+   */
+  const serverOfferedSourceUrls = useMemo(
+    () => collectOfferedSourceUrls(availableServers, visibleSources, category),
+    [availableServers, visibleSources, category],
+  );
+
+  // External provider sources the language section owns: not the app's own
+  // servers, not torrents (TorrentSourcePanel), not marketplace, and not the
+  // stream a provider row already offers.
+  const isGroupableProviderSource = useCallback(
+    (source: any) =>
+      !!source &&
+      !isOfficialSource(source) &&
+      !isTorrentSource(source) &&
+      !!source.providerName &&
+      source.providerName !== 'TatakaiAPI' &&
+      !source.langCode?.startsWith('marketplace-') &&
+      !(source.url && serverOfferedSourceUrls.has(String(source.url))),
+    [isOfficialSource, isTorrentSource, serverOfferedSourceUrls],
+  );
+
   // Group external sources by language (excluding marketplace)
   const languageGroups = useMemo<Record<string, any[]>>(() => {
     if (visibleSources.length === 0) return {};
@@ -2347,9 +2347,7 @@ export default function WatchPage() {
     return visibleSources.reduce((acc: Record<string, any[]>, source) => {
       // Only group external providers (Animelok, WatchAnimeWorld, Animeya, etc.)
       // AND exclude marketplace sources (they have their own section)
-      if (isOfficialSource(source)) return acc;
-      if (isTorrentSource(source)) return acc;
-      if (!source.providerName || source.providerName === 'TatakaiAPI' || source.langCode?.startsWith('marketplace-')) return acc;
+      if (!isGroupableProviderSource(source)) return acc;
 
       let lang = source.language || "Unknown";
 
@@ -2381,7 +2379,7 @@ export default function WatchPage() {
       acc[lang].push(source);
       return acc;
     }, {});
-  }, [visibleSources, isOfficialSource, isTorrentSource]);
+  }, [visibleSources, isGroupableProviderSource]);
 
   // Button labels. Two rules matter here:
   //  - the *label* must derive from the provider (so the curated aliases in
@@ -2468,10 +2466,16 @@ export default function WatchPage() {
       return getSimpleSourceLabel(selectedSource, selectedSource?.providerName || "server");
     }
     if (currentServer?.serverName) {
-      return getSimpleServerDisplayName(currentServer.serverName, getFriendlyServerName(currentServer.serverName));
+      // `serverName` is the extension's provider *key* (a UUID for installed
+      // remote extensions), so the human name has to come from the row's own
+      // provider fields — same rule the server buttons below use.
+      return getSimpleServerDisplayName(
+        currentServer.serverName,
+        currentServer.displayName || currentServer.providerName || getFriendlyServerName(currentServer.serverName),
+      );
     }
     return undefined;
-  }, [isOfflineMode, selectedSource, currentServer?.serverName, uniqueLabelMap]);
+  }, [isOfflineMode, selectedSource, currentServer, uniqueLabelMap]);
 
   const updateWatchHistory = useUpdateWatchHistory();
   const initialSavedRef = useRef<string | null>(null);
@@ -3218,7 +3222,7 @@ export default function WatchPage() {
                   isLoading={isOfflineMode ? false : playbackLoading}
                   serverName={activeServerDisplayName}
                   malId={sourcesData?.malID || animeData?.moreInfo.malId}
-                  episodeNumber={currentEpisode?.number || (isOfflineMode ? offlineManifest?.episodes.find((e: any) => e.id === decodedEpisodeId)?.number : undefined)}
+                  episodeNumber={currentEpisodeNumber}
                   introWindow={sourceDataForPlayback?.intro || null}
                   outroWindow={sourceDataForPlayback?.outro || null}
                   initialSeekSeconds={initialSeekSeconds}
@@ -3253,7 +3257,7 @@ export default function WatchPage() {
                   isLoading={isOfflineMode ? false : playbackLoading}
                   serverName={activeServerDisplayName}
                   malId={sourcesData?.malID || animeData?.moreInfo.malId}
-                  episodeNumber={currentEpisode?.number || (isOfflineMode ? offlineManifest?.episodes.find((e: any) => e.id === decodedEpisodeId)?.number : undefined)}
+                  episodeNumber={currentEpisodeNumber}
                   introWindow={sourceDataForPlayback?.intro || null}
                   outroWindow={sourceDataForPlayback?.outro || null}
                   initialSeekSeconds={initialSeekSeconds}
@@ -3329,7 +3333,7 @@ export default function WatchPage() {
                 <h1 className="font-display text-lg md:text-2xl font-bold">
                   {isGenericTorrent
                     ? (torrentLiveStats?.name || uiI18n.t('app.torrent_content_839cb364'))
-                    : uiI18n.t('app.episode_i18n_value_0_f05acda8', { value0: currentEpisode?.number || (isOfflineMode ? offlineManifest?.episodes.find((e: any) => e.id === decodedEpisodeId)?.number : "?") })
+                    : uiI18n.t('app.episode_i18n_value_0_f05acda8', { value0: currentEpisodeNumber ?? "?" })
                   }
                 </h1>
                 {!isGenericTorrent && currentEpisode?.title && (
@@ -3580,14 +3584,7 @@ export default function WatchPage() {
 
                         {/* Language Groups (Categorized External Sources) */}
                         <SourceLanguageTabs
-                          sources={visibleSources.filter(
-                            (src) =>
-                              !isOfficialSource(src) &&
-                              !isTorrentSource(src) &&
-                              !!src.providerName &&
-                              src.providerName !== "TatakaiAPI" &&
-                              !src.langCode?.startsWith("marketplace-"),
-                          )}
+                          sources={visibleSources.filter(isGroupableProviderSource)}
                           activeLanguage={activeSourceLanguage}
                           onLanguageChange={setActiveSourceLanguage}
                         />
@@ -3615,7 +3612,7 @@ export default function WatchPage() {
                                 const failCount = getSourceFailureCount(sourceComboKey);
                                 const healthScore = getSourceHealthScore(sourceServerName);
                                 const workingState = failCount >= 2 ? "Not working" : "Working";
-                                const hoverInfo = `${workingState} • Health ${healthScore}/100 • Fails ${failCount} • Source ${sourceServerName} • ${getUrlHost(source.url)}`;
+                                const hoverInfo = uiI18n.t('app.i18n_value_0_health_i18n_value_1_100_fails_i18n__73fcf62f', { value0: workingState, value1: healthScore, value2: failCount, value3: sourceServerName, value4: source.url ? ` • ${getUrlHost(source.url)}` : "" });
                                 const sourceHoverRows = buildSourceHoverRows(source);
                                 const sourceRealProvider = source.providerName || source.server || sourceServerName;
                                 const sourceRealKey = source.providerKey;
