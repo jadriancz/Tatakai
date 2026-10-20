@@ -2,7 +2,7 @@ import { getPreferredTitleLanguage, selectMediaTitle } from '@/lib/titleLanguage
 import uiI18n from '@/lib/uiI18n';
 import { useUiTranslation } from '@/hooks/ui/useUiTranslation';
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { applyEpisodeAvailability } from '@/lib/episodeAvailability';
+import { applyEpisodeAvailability, fallbackEpisodeCount } from '@/lib/episodeAvailability';
 import { contentGraph, toAnimeCard, toHomeData } from "@/core";
 import { trackEvent } from "@/core/analytics/AnalyticsService";
 import type { MediaFormat, MediaSeason, MediaStatus, SearchFilters, TatakaiMedia } from "@/core";
@@ -621,20 +621,28 @@ export function useEpisodes(animeId: string | undefined) {
         episodes = await fetchDbEpisodes(media, baseId);
       }
 
-      // 3. Server-mediated MAL/Jikan episodes (via TatakaiAPI only)
+      // 3. Server-mediated MAL/Jikan episodes (via TatakaiAPI only). Best-effort
+      // tier: the upstream Jikan mirror answers 503 for titles it has not
+      // indexed, and that throw used to abort the whole cascade — the page was
+      // left with no episodes at all instead of degrading to placeholders.
       if (episodes.length === 0) {
-        let resolvedMalId = media.malId ?? null;
-        if (!resolvedMalId) {
-          resolvedMalId = await resolveMalIdFromSearch(media);
-        }
-        if (resolvedMalId) {
-          episodes = await fetchMalEpisodesViaApi(resolvedMalId, baseId);
+        try {
+          let resolvedMalId = media.malId ?? null;
+          if (!resolvedMalId) {
+            resolvedMalId = await resolveMalIdFromSearch(media);
+          }
+          if (resolvedMalId) {
+            episodes = await fetchMalEpisodesViaApi(resolvedMalId, baseId);
+          }
+        } catch (err) {
+          console.warn('[useEpisodes] MAL/Jikan tier failed, degrading to placeholders', err);
         }
       }
 
-      // 4. Count-based placeholders from AniList episode total
+      // 4. Count-based placeholders from AniList episode total, falling back to
+      // the next-airing schedule when a still-airing title has no total yet.
       if (episodes.length === 0) {
-        const count = Math.min(media.episodes ?? 0, 2000);
+        const count = fallbackEpisodeCount(media);
         episodes = Array.from({ length: count }, (_, i) => ({
           episodeId: buildEpisodeId(baseId, i + 1),
           number: i + 1,

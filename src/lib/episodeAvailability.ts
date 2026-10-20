@@ -37,6 +37,26 @@ export function applyEpisodeAvailability<T extends EpisodeAvailability>(
   });
 }
 
+/**
+ * How many episodes the count-based fallback may synthesize for a title AniList
+ * has no episode total for. While a show is still airing, `episodes` is null on
+ * AniList, which used to collapse the fallback to zero placeholders — the UI
+ * then had no episode to open and never asked extensions for anything. The
+ * next-airing schedule still knows the truth: whatever comes before the
+ * upcoming episode number has aired.
+ */
+export function fallbackEpisodeCount(
+  media: { episodes?: number | null; nextAiringEpisode?: { episode: number; airingAt: number } | null },
+  now = Date.now(),
+): number {
+  const declared = Math.min(media.episodes ?? 0, 2000);
+  if (declared > 0) return declared;
+  const next = media.nextAiringEpisode;
+  if (!next || !Number.isFinite(next.episode) || next.episode <= 0) return 0;
+  const upcomingHasAired = next.airingAt * 1000 <= now;
+  return Math.min(Math.max(next.episode - (upcomingHasAired ? 0 : 1), 0), 2000);
+}
+
 export function availableDownloadEpisodes<T extends EpisodeAvailability>(episodes: T[], now = Date.now()): T[] {
   return applyEpisodeAvailability(episodes, undefined, now).filter(episode => episode.hasAired !== false);
 }

@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEpisodeAvailability, availableDownloadEpisodes, episodeAirTime } from '../src/lib/episodeAvailability';
+import { applyEpisodeAvailability, availableDownloadEpisodes, episodeAirTime, fallbackEpisodeCount } from '../src/lib/episodeAvailability';
 
 const now = Date.parse('2026-10-11T12:00:00Z');
+
+const SOURCE_TIMESTAMP = now;
+const HOUR = (offsetSeconds: number) => Math.floor(SOURCE_TIMESTAMP / 1000) + offsetSeconds;
 
 describe('episode availability', () => {
   test('download selection excludes future placeholders while keeping released episodes', () => {
@@ -51,6 +54,29 @@ describe('episode availability', () => {
     ], undefined, now).map(episode => episode.hasAired)).toEqual([false, true]);
     expect(applyEpisodeAvailability([{ number: 3, hasAired: false, airDateUtc: '2026-10-17T12:00:00Z' }], undefined,
       Date.parse('2026-10-17T12:00:00Z'))[0].hasAired).toBe(true);
+  });
+  test('a still-airing title with no AniList total gets placeholders from the next-airing schedule', () => {
+    const media = { episodes: null, nextAiringEpisode: { episode: 3, airingAt: Date.parse('2026-10-25T12:00:00Z') / 1000 } };
+    expect(fallbackEpisodeCount(media, now)).toBe(2);
+  });
+  test('once the scheduled episode airs it is counted too', () => {
+    const media = { episodes: null, nextAiringEpisode: { episode: 3, airingAt: Date.parse('2026-10-25T12:00:00Z') / 1000 } };
+    expect(fallbackEpisodeCount(media, Date.parse('2026-10-26T00:00:00Z'))).toBe(3);
+  });
+  test('a declared AniList total still wins over the schedule', () => {
+    expect(fallbackEpisodeCount({ episodes: 12, nextAiringEpisode: { episode: 3, airingAt: 0 } }, now)).toBe(12);
+    expect(fallbackEpisodeCount({ episodes: 0, nextAiringEpisode: { episode: 9, airingAt: HOUR(1) } }, now)).toBe(8);
+  });
+  test('finished and unknown titles stay at zero placeholders', () => {
+    expect(fallbackEpisodeCount({ episodes: null }, now)).toBe(0);
+    expect(fallbackEpisodeCount({ episodes: null, nextAiringEpisode: null }, now)).toBe(0);
+    expect(fallbackEpisodeCount({ episodes: 0, nextAiringEpisode: { episode: 0, airingAt: 0 } }, now)).toBe(0);
+    expect(fallbackEpisodeCount({}, now)).toBe(0);
+  });
+  test('the placeholder cap still applies to a schedule-derived count', () => {
+    const media = { episodes: null, nextAiringEpisode: { episode: 5000, airingAt: HOUR(1) } };
+    expect(fallbackEpisodeCount(media, now)).toBe(2000);
+    expect(fallbackEpisodeCount({ episodes: 99999 }, now)).toBe(2000);
   });
   test('specials do not block regular episodes or inherit their airing boundary', () => {
     const result = applyEpisodeAvailability([

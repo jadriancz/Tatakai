@@ -1,5 +1,5 @@
 import { contentGraph, toAnimeCard, toHomeData } from "@/core";
-import { applyEpisodeAvailability } from '@/lib/episodeAvailability';
+import { applyEpisodeAvailability, fallbackEpisodeCount } from '@/lib/episodeAvailability';
 import type { EpisodeData, EpisodeServer, HomeData, StreamingData } from "@/types/anime";
 import { getHighQualityImage } from "@/lib/api/proxy-utils";
 import { fetchJikanEpisodes } from "@/core/content/jikan-client";
@@ -241,7 +241,7 @@ export async function fetchEpisodes(animeId: string) {
   }
 
   if (episodes.length === 0) {
-    const count = Math.min(media.episodes ?? 0, 2000);
+    const count = fallbackEpisodeCount(media);
     episodes = Array.from({ length: count }, (_, i) => ({
       episodeId: `${baseId}?ep=${i + 1}`,
       number: i + 1,
