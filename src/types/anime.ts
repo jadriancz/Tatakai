@@ -214,8 +214,6 @@ export interface EpisodeServer {
   headers?: Record<string, string>;
   /** Ordered fallback Referers supplied by the extension result processor. */
   refererCandidates?: string[];
-  /** Extension registry rank used to preserve its preferred-server order. */
-  providerPriority?: number;
   /**
    * The extension's own ranking of this server, lowest first.
    *

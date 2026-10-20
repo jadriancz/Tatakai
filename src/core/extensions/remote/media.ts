@@ -35,8 +35,13 @@ export async function proxyRemoteUrl(url: string, headers: Record<string, string
 export async function proxyRemoteSources(sources: any[]): Promise<any[]> {
   const settled = await Promise.allSettled(sources.map(async source => {
     if (typeof source.url !== 'string' || !/^(https?:\/\/|magnet:\?)/i.test(source.url)) throw Error('Invalid source URL');
+    // Subtitle tracks are forced through the proxy even with no headers to send:
+    // a <track> is the one media element Chromium fetches under CORS regardless of
+    // the element's own mode, and the proxy is the only origin that answers with
+    // `Access-Control-Allow-Origin: *`. Unproxied, a third-party addon's .vtt
+    // reaches the player as a track that errors on load and shows no cues.
     const tracks = await Promise.allSettled((source.subtitles || []).filter((track: any) => typeof track.url === 'string' && /^https?:\/\//i.test(track.url)).map(async (track: any) => ({ ...track,
-      url: await proxyRemoteUrl(track.url, track.headers || source.headers), originalUrl: unwrapLegacyMediaUrl(track.url),
+      url: await proxyRemoteUrl(track.url, track.headers || source.headers, true), originalUrl: unwrapLegacyMediaUrl(track.url),
     })));
     const original = unwrapLegacyMediaUrl(source.originalUrl || source.url);
     return { ...source, originalUrl: original,

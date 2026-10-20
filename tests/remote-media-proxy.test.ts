@@ -39,3 +39,20 @@ it('repairs legacy URLs returned by Stremio custom streams without request heade
     expect(sources[0].url).toContain('/stream/token');
   } finally { if (previous === undefined) delete (globalThis as any).window; else (globalThis as any).window = previous; }
 });
+
+// A <track> is the one media element the browser insists on fetching with CORS,
+// so a subtitle URL the player is handed must be CORS-served even when the
+// request itself needs no special headers.
+it('routes headerless subtitle tracks through the native proxy', async () => {
+  const previous = (globalThis as any).window;
+  const calls: any[] = [];
+  (globalThis as any).window = { electron: { proxyExtensionSource: async (input: any) => { calls.push(input); return 'http://127.0.0.1:1234/stream/subtitle-token'; } } };
+  try {
+    const sources = await proxyRemoteSources([
+      { url: 'https://fixture.test/video.m3u8', subtitles: [{ url: 'http://127.0.0.1:8000/subs/abc.vtt', lang: 'spa' }] },
+    ]);
+    expect(calls).toEqual([{ url: 'http://127.0.0.1:8000/subs/abc.vtt', headers: {} }]);
+    expect(sources[0].subtitles[0].url).toBe('http://127.0.0.1:1234/stream/subtitle-token');
+    expect(sources[0].subtitles[0].originalUrl).toBe('http://127.0.0.1:8000/subs/abc.vtt');
+  } finally { if (previous === undefined) delete (globalThis as any).window; else (globalThis as any).window = previous; }
+});

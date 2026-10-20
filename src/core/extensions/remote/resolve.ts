@@ -72,7 +72,7 @@ export async function resolveRemoteSources(options: { anilistId?: number; title?
         if (supportsResource(manifest, 'subtitles', type, id)) {
           try {
             const subs = await fetchExtensionJson(stremioResourceUrl(row.manifestUrl, 'subtitles', type, id), signal);
-            const tracks = await Promise.all((subs.subtitles || []).filter((s: any) => typeof s.url === 'string' && /^https?:\/\//i.test(s.url)).map(async (s: any) => ({ url: await proxyRemoteUrl(s.url, s.headers), language: s.lang, lang: s.lang, label: `${languageLabel(s.lang)} · ${row.manifest.name}`, providerName: row.manifest.name })));
+            const tracks = await Promise.all((subs.subtitles || []).filter((s: any) => typeof s.url === 'string' && /^https?:\/\//i.test(s.url)).map(async (s: any) => ({ url: await proxyRemoteUrl(s.url, s.headers, true), language: s.lang, lang: s.lang, label: `${languageLabel(s.lang)} · ${row.manifest.name}`, providerName: row.manifest.name })));
             subtitleCount = tracks.length;
             subtitles.push(...tracks);
           } catch (error) { subtitleError = error instanceof Error ? error.message : 'Subtitle lookup failed'; }

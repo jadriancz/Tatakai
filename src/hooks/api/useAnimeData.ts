@@ -623,18 +623,26 @@ export function useEpisodes(animeId: string | undefined) {
 
       // 3. Server-mediated MAL/Jikan episodes (via TatakaiAPI only)
       if (episodes.length === 0) {
-        let resolvedMalId = media.malId ?? null;
-        if (!resolvedMalId) {
-          resolvedMalId = await resolveMalIdFromSearch(media);
-        }
-        if (resolvedMalId) {
-          episodes = await fetchMalEpisodesViaApi(resolvedMalId, baseId);
+        try {
+          let resolvedMalId = media.malId ?? null;
+          if (!resolvedMalId) {
+            resolvedMalId = await resolveMalIdFromSearch(media);
+          }
+          if (resolvedMalId) {
+            episodes = await fetchMalEpisodesViaApi(resolvedMalId, baseId);
+          }
+        } catch {
+          // MAL/Jikan unavailable → fall through to tier 4 placeholders.
         }
       }
 
-      // 4. Count-based placeholders from AniList episode total
+      // 4. Count-based placeholders from AniList episode total.
+      // For airing shows AniList reports total=null, but nextAiringEpisode.episode
+      // tells us how many have already aired (e.g. next=3 → 2 aired).
       if (episodes.length === 0) {
-        const count = Math.min(media.episodes ?? 0, 2000);
+        const knownTotal = media.episodes ?? 0;
+        const airedFromSchedule = Math.max((media.nextAiringEpisode?.episode ?? 1) - 1, 0);
+        const count = Math.min(knownTotal || airedFromSchedule, 2000);
         episodes = Array.from({ length: count }, (_, i) => ({
           episodeId: buildEpisodeId(baseId, i + 1),
           number: i + 1,
