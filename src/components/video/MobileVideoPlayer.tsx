@@ -463,6 +463,12 @@ export function MobileVideoPlayer({
     if (!settings.autoSkipIntro || !activeSkip || !videoRef.current) return;
     if (activeSkip.type !== 'op' && activeSkip.type !== 'mixed-op' && activeSkip.type !== 'recap') return;
 
+    // Tolerance buffer: only auto-skip if we're at least 1.5s into the skip segment.
+    // This prevents premature skipping when AniSkip/source timestamps are slightly inaccurate.
+    const AUTO_SKIP_TOLERANCE = 1.5;
+    const timeIntoSegment = videoRef.current.currentTime - activeSkip.startTime;
+    if (timeIntoSegment < AUTO_SKIP_TOLERANCE) return;
+
     const key = `${activeSkip.type}:${activeSkip.startTime}:${activeSkip.endTime}`;
     if (autoSkippedWindowRef.current === key) return;
 
